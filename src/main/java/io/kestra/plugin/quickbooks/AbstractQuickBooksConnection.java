@@ -11,11 +11,12 @@ import io.kestra.core.storages.kv.KVStore;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
+import jakarta.validation.constraints.NotNull;
 
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import io.kestra.core.http.client.HttpClient;
+import io.kestra.core.http.HttpRequest;
+import io.kestra.core.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
@@ -32,7 +33,8 @@ public abstract class AbstractQuickBooksConnection extends Task {
         title = "QuickBooks Client ID",
         description = "The OAuth2 Client ID for your QuickBooks application"
     )
-    @PluginProperty(secret = true)
+    @PluginProperty(secret = true, group = "connection")
+    @NotNull
     @ToString.Exclude
     protected Property<String> clientId;
 
@@ -40,7 +42,8 @@ public abstract class AbstractQuickBooksConnection extends Task {
         title = "QuickBooks Client Secret",
         description = "The OAuth2 Client Secret for your QuickBooks application"
     )
-    @PluginProperty(secret = true)
+    @PluginProperty(secret = true, group = "connection")
+    @NotNull
     @ToString.Exclude
     protected Property<String> clientSecret;
 
@@ -48,7 +51,8 @@ public abstract class AbstractQuickBooksConnection extends Task {
         title = "QuickBooks Refresh Token",
         description = "A valid OAuth2 refresh token. Kestra will automatically rotate and persist it in the KV Store."
     )
-    @PluginProperty(secret = true)
+    @PluginProperty(secret = true, group = "connection")
+    @NotNull
     @ToString.Exclude
     protected Property<String> refreshToken;
 
@@ -56,7 +60,8 @@ public abstract class AbstractQuickBooksConnection extends Task {
         title = "QuickBooks Realm ID",
         description = "The Realm ID (Company ID) for the QuickBooks account"
     )
-    @PluginProperty(secret = true)
+    @PluginProperty(secret = true, group = "connection")
+    @NotNull
     @ToString.Exclude
     protected Property<String> realmId;
 
@@ -65,7 +70,7 @@ public abstract class AbstractQuickBooksConnection extends Task {
         description = "The Base URL for QuickBooks API. Defaults to production.",
         defaultValue = "https://quickbooks.api.intuit.com"
     )
-    @PluginProperty
+    @PluginProperty(group = "connection")
     @Builder.Default
     protected Property<String> baseUrl = Property.of("https://quickbooks.api.intuit.com");
 
@@ -74,37 +79,27 @@ public abstract class AbstractQuickBooksConnection extends Task {
         description = "The minor version of the QuickBooks API to use.",
         defaultValue = "75"
     )
-    @PluginProperty
+    @PluginProperty(group = "connection")
     @Builder.Default
     protected Property<String> minorversion = Property.of("75");
 
     protected String getAccessToken(RunContext runContext) throws Exception {
-        String realm = runContext.render(realmId).as(String.class).orElseThrow();
-        String currentClientId = runContext.render(clientId).as(String.class).orElseThrow();
-        String currentClientSecret = runContext.render(clientSecret).as(String.class).orElseThrow();
-        String defaultRefreshToken = runContext.render(refreshToken).as(String.class).orElseThrow();
+        String realm = runContext.render(realmId).as(String.class)
+            .orElseThrow(() -> new IllegalArgumentException("realmId is required"));
+        String currentClientId = runContext.render(clientId).as(String.class)
+            .orElseThrow(() -> new IllegalArgumentException("clientId is required"));
+        String currentClientSecret = runContext.render(clientSecret).as(String.class)
+            .orElseThrow(() -> new IllegalArgumentException("clientSecret is required"));
+        String defaultRefreshToken = runContext.render(refreshToken).as(String.class)
+            .orElseThrow(() -> new IllegalArgumentException("refreshToken is required"));
 
         KVStore kvStore = runContext.namespaceKv(runContext.flowInfo().namespace());
         String kvKey = "quickbooks_oauth_" + realm;
 
-        // Note: Using standard Java 11 HttpClient since io.kestra.core.http.client requires micronaut injection
-        HttpClient client = HttpClient.newBuilder().build();
+        HttpClient client = HttpClient.builder().runContext(runContext).build();
 
         // Check if we have a valid token in KV store
-        Optional<String> kvValue = kvStore.get(kvKey).map(entry -> {
-            try {
-                // KVEntry might be a record in Java 21, so use reflection if value() or getValue() is unknown
-                java.lang.reflect.Method m = entry.getClass().getMethod("value");
-                return m.invoke(entry).toString();
-            } catch (Exception e) {
-                try {
-                    java.lang.reflect.Method m = entry.getClass().getMethod("getValue");
-                    return m.invoke(entry).toString();
-                } catch (Exception ex) {
-                    return entry.toString();
-                }
-            }
-        });
+        Optional<String> kvValue = kvStore.getValue(kvKey).map(val -> val.value().toString());
         String activeRefreshToken = defaultRefreshToken;
 
         if (kvValue.isPresent()) {
@@ -121,48 +116,38 @@ public abstract class AbstractQuickBooksConnection extends Task {
         String authHeader = "Basic " + Base64.getEncoder().encodeToString((currentClientId + ":" + currentClientSecret).getBytes(StandardCharsets.UTF_8));
         String body = "grant_type=refresh_token&refresh_token=" + activeRefreshToken;
 
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest request = HttpRequest.builder()
             .uri(URI.create("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"))
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Authorization", authHeader)
-            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .method("POST")
+            .addHeader("Accept", "application/json")
+            .addHeader("Content-Type", "application/x-www-form-urlencoded")
+            .addHeader("Authorization", authHeader)
+            .body(HttpRequest.StringRequestBody.builder()
+                .content(body)
+                .contentType("application/x-www-form-urlencoded")
+                .charset(StandardCharsets.UTF_8)
+                .build())
             .build();
 
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = client.request(request, String.class);
 
-        if (response.statusCode() >= 300) {
-            throw new RuntimeException("Failed to refresh QuickBooks token: " + response.statusCode() + " " + response.body());
+        if (response.getStatus().getCode() >= 300) {
+            throw new IllegalStateException("Intuit OAuth2 refresh failed with status " + response.getStatus().getCode() + " " + response.getBody() + ". Please re-authenticate and provide a new refresh token.");
         }
 
-        TokenResponse tokenResponse = JacksonMapper.ofJson().readValue(response.body(), TokenResponse.class);
+        TokenResponse tokenResponse = JacksonMapper.ofJson().readValue(response.getBody(), TokenResponse.class);
 
         OAuthState newState = new OAuthState();
         newState.setAccessToken(tokenResponse.getAccess_token());
         newState.setRefreshToken(tokenResponse.getRefresh_token());
         newState.setExpiresAt(Instant.now().getEpochSecond() + tokenResponse.getExpires_in());
 
-        // Concurrency Note: kvStore.put in Kestra might not have strict CAS natively exposed easily here,
-        // but updating the KV will persist the new token for the namespace.
-        // The rolling 100-day refresh token allows concurrent refreshes within 24h to return the same token,
-        // preventing race conditions from invalidating the token.
-        try {
-            // Attempt to instantiate KVValueAndMetadata via reflection to avoid constructor signature issues
-            Class<?> kvMetadataClass = Class.forName("io.kestra.core.storages.kv.KVValueAndMetadata");
-            Object kvValueAndMetadata;
-            try {
-                kvValueAndMetadata = kvMetadataClass.getConstructor(Object.class).newInstance(JacksonMapper.ofJson().writeValueAsString(newState));
-            } catch (Exception e) {
-                try {
-                    kvValueAndMetadata = kvMetadataClass.getConstructor(io.kestra.core.storages.kv.KVMetadata.class, Object.class).newInstance(null, JacksonMapper.ofJson().writeValueAsString(newState));
-                } catch (Exception e2) {
-                    kvValueAndMetadata = kvMetadataClass.getConstructors()[0].newInstance(null, JacksonMapper.ofJson().writeValueAsString(newState));
-                }
-            }
-            kvStore.put(kvKey, (io.kestra.core.storages.kv.KVValueAndMetadata) kvValueAndMetadata);
-        } catch (Exception e) {
-            runContext.logger().warn("Failed to persist QuickBooks token to KV store: " + e.getMessage());
-        }
+        // Save to KV store. If this fails, the exception will propagate and fail the task loudly
+        // to prevent data corruption per security guidelines.
+        kvStore.put(kvKey, new io.kestra.core.storages.kv.KVValueAndMetadata(
+            (io.kestra.core.storages.kv.KVMetadata) null,
+            JacksonMapper.ofJson().writeValueAsString(newState)
+        ));
 
         return newState.getAccessToken();
     }
