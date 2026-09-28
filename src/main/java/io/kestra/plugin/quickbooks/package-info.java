@@ -1,7 +1,7 @@
 @PluginSubGroup(
-    title = "Quickbooks",
-    description = "Quickbooks plugin for Kestra",
-    categories = PluginSubGroup.PluginCategory.DATA
+    title = "QuickBooks",
+    description = "QuickBooks plugin for Kestra",
+    categories = {PluginSubGroup.PluginCategory.BUSINESS, PluginSubGroup.PluginCategory.DATA}
 )
 package io.kestra.plugin.quickbooks;
 

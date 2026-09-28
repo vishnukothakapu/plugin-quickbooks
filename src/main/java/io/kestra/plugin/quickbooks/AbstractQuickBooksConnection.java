@@ -1,26 +1,41 @@
 package io.kestra.plugin.quickbooks;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Base64;
+
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
+import io.kestra.core.http.HttpRequest;
+import io.kestra.core.http.client.HttpClient;
+import io.kestra.core.http.client.HttpClientResponseException;
+
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.storages.kv.KVMetadata;
 import io.kestra.core.storages.kv.KVStore;
+import io.kestra.core.storages.kv.KVValueAndMetadata;
 import io.swagger.v3.oas.annotations.media.Schema;
-import lombok.*;
-import lombok.experimental.SuperBuilder;
-import jakarta.validation.constraints.NotNull;
 
-import java.net.URI;
-import io.kestra.core.http.client.HttpClient;
-import io.kestra.core.http.HttpRequest;
-import io.kestra.core.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.Base64;
-import java.util.Optional;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Builder;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+import lombok.experimental.SuperBuilder;
 
 @SuperBuilder
 @ToString
@@ -28,6 +43,11 @@ import java.util.Optional;
 @Getter
 @NoArgsConstructor
 public abstract class AbstractQuickBooksConnection extends Task {
+    private static final String DEFAULT_BASE_URL = "https://quickbooks.api.intuit.com";
+    private static final String DEFAULT_AUTH_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+    private static final Integer DEFAULT_MINOR_VERSION = 75;
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> REFRESH_LOCKS = new java.util.concurrent.ConcurrentHashMap<>();
+
 
     @Schema(
         title = "QuickBooks Client ID",
@@ -49,7 +69,7 @@ public abstract class AbstractQuickBooksConnection extends Task {
 
     @Schema(
         title = "QuickBooks Refresh Token",
-        description = "A valid OAuth2 refresh token. Kestra will automatically rotate and persist it in the KV Store."
+        description = "A valid OAuth2 refresh token. Kestra will automatically rotate and persist it in the KV Store. Note: Token rotation is not cross-worker concurrency safe, and failed KV store writes may result in lost tokens."
     )
     @PluginProperty(secret = true, group = "connection")
     @NotNull
@@ -60,114 +80,253 @@ public abstract class AbstractQuickBooksConnection extends Task {
         title = "QuickBooks Realm ID",
         description = "The Realm ID (Company ID) for the QuickBooks account"
     )
-    @PluginProperty(secret = true, group = "connection")
+    @PluginProperty(group = "connection")
     @NotNull
-    @ToString.Exclude
+    @Pattern(regexp = "^[0-9]+$")
     protected Property<String> realmId;
 
     @Schema(
         title = "Base URL",
-        description = "The Base URL for QuickBooks API. Defaults to production.",
+        description = "The Base URL for QuickBooks API. Must be an intuit.com domain. Defaults to production.",
         defaultValue = "https://quickbooks.api.intuit.com"
     )
     @PluginProperty(group = "connection")
     @Builder.Default
-    protected Property<String> baseUrl = Property.of("https://quickbooks.api.intuit.com");
+    protected Property<String> baseUrl = Property.ofValue(DEFAULT_BASE_URL);
 
     @Schema(
         title = "Minor Version",
-        description = "The minor version of the QuickBooks API to use.",
+        description = "The minor version of the QuickBooks API to use. Must be strictly positive.",
         defaultValue = "75"
     )
     @PluginProperty(group = "connection")
+    @Min(1)
     @Builder.Default
-    protected Property<String> minorversion = Property.of("75");
+    protected Property<Integer> minorVersion = Property.ofValue(DEFAULT_MINOR_VERSION);
+
+    @Schema(
+        title = "Authentication URL",
+        description = "The OAuth2 token endpoint. Must be an intuit.com domain.",
+        defaultValue = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+    )
+    @PluginProperty(group = "connection")
+    @Builder.Default
+    protected Property<String> authUrl = Property.ofValue(DEFAULT_AUTH_URL);
+
+    void validateUrl(String name, String url) throws Exception {
+        var uri = URI.create(url);
+        if (!"https".equalsIgnoreCase(uri.getScheme())) {
+            throw new IllegalArgumentException(name + " must use HTTPS. Provided: " + url);
+        }
+        if (uri.getHost() == null || (!uri.getHost().equals("intuit.com") && !uri.getHost().endsWith(".intuit.com"))) {
+            throw new IllegalArgumentException(name + " host must be an Intuit domain. Provided: " + url);
+        }
+    }
+
+    protected String getValidatedAuthUrl(RunContext runContext) throws Exception {
+        var rAuthUrl = runContext.render(authUrl).as(String.class).orElse(DEFAULT_AUTH_URL);
+        validateUrl("authUrl", rAuthUrl);
+        return rAuthUrl;
+    }
+
+    protected String getValidatedBaseUrl(RunContext runContext) throws Exception {
+        var rBaseUrl = runContext.render(baseUrl).as(String.class).orElse(DEFAULT_BASE_URL);
+        validateUrl("baseUrl", rBaseUrl);
+        return rBaseUrl;
+    }
+
+    protected Integer getValidatedMinorVersion(RunContext runContext) throws Exception {
+        var rMinorVersion = runContext.render(minorVersion).as(Integer.class).orElse(DEFAULT_MINOR_VERSION);
+        if (rMinorVersion < 1) {
+            throw new IllegalArgumentException("minorVersion must be positive. Provided: " + rMinorVersion);
+        }
+        return rMinorVersion;
+    }
 
     protected String getAccessToken(RunContext runContext) throws Exception {
-        String realm = runContext.render(realmId).as(String.class)
-            .orElseThrow(() -> new IllegalArgumentException("realmId is required"));
-        String currentClientId = runContext.render(clientId).as(String.class)
-            .orElseThrow(() -> new IllegalArgumentException("clientId is required"));
-        String currentClientSecret = runContext.render(clientSecret).as(String.class)
-            .orElseThrow(() -> new IllegalArgumentException("clientSecret is required"));
-        String defaultRefreshToken = runContext.render(refreshToken).as(String.class)
-            .orElseThrow(() -> new IllegalArgumentException("refreshToken is required"));
+        var rRealmId = runContext.render(realmId).as(String.class)
+            .orElseThrow(() -> new IllegalVariableEvaluationException("realmId is required"));
+        if (!rRealmId.matches("^[0-9]+$")) {
+            throw new IllegalArgumentException("realmId must be numeric");
+        }
 
-        KVStore kvStore = runContext.namespaceKv(runContext.flowInfo().namespace());
-        String kvKey = "quickbooks_oauth_" + realm;
+        var rAuthUrl = getValidatedAuthUrl(runContext);
 
-        HttpClient client = HttpClient.builder().runContext(runContext).build();
+        var rClientId = runContext.render(clientId).as(String.class)
+            .orElseThrow(() -> new IllegalVariableEvaluationException("clientId is required"));
+        var rClientSecret = runContext.render(clientSecret).as(String.class)
+            .orElseThrow(() -> new IllegalVariableEvaluationException("clientSecret is required"));
+        var rRefreshToken = runContext.render(refreshToken).as(String.class)
+            .orElseThrow(() -> new IllegalVariableEvaluationException("refreshToken is required"));
 
-        // Check if we have a valid token in KV store
-        Optional<String> kvValue = kvStore.getValue(kvKey).map(val -> val.value().toString());
-        String activeRefreshToken = defaultRefreshToken;
+        var seedHash = Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(rRefreshToken.getBytes(StandardCharsets.UTF_8)));
+        var clientIdHash = Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(rClientId.getBytes(StandardCharsets.UTF_8)));
 
+        var kvStore = runContext.namespaceKv(runContext.flowInfo().namespace());
+        var kvKey = "quickbooks_oauth_" + rRealmId + "_" + clientIdHash;
+
+        var lock = REFRESH_LOCKS.computeIfAbsent(kvKey, k -> new java.util.concurrent.locks.ReentrantLock());
+        lock.lock();
+        try {
+            return getOrRefreshToken(runContext, kvStore, kvKey, rClientId, rClientSecret, rRefreshToken, seedHash, rAuthUrl, false);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+
+    private OAuthState readState(RunContext runContext, KVStore kvStore, String kvKey) throws Exception {
+        var kvValue = kvStore.getValue(kvKey).map(val -> val.value().toString());
         if (kvValue.isPresent()) {
-            OAuthState state = JacksonMapper.ofJson().readValue(kvValue.get(), OAuthState.class);
-            if (state.getExpiresAt() > Instant.now().getEpochSecond() + 60) {
-                return state.getAccessToken(); // Token is still valid
+            String decrypted;
+            try {
+                decrypted = runContext.decrypt(kvValue.get());
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to decrypt KV store data. Please configure 'kestra.encryption.secret-key' in your Kestra configuration.", e);
             }
-            if (state.getRefreshToken() != null) {
+            try {
+                return JacksonMapper.ofJson().readValue(decrypted, OAuthState.class);
+            } catch (Exception e) {
+                runContext.logger().warn("Failed to parse QuickBooks OAuth state from KV store for key: {}", kvKey);
+                throw new IllegalStateException("Corrupted OAuth state in KV store. Please clear the KV store and re-authenticate.", e);
+            }
+        }
+        return null;
+    }
+
+    TokenResponse performRefresh(RunContext runContext, String rAuthUrl, String rClientId, String rClientSecret, String activeRefreshToken) throws Exception {
+        var authHeader = "Basic " + Base64.getEncoder().encodeToString((rClientId + ":" + rClientSecret).getBytes(StandardCharsets.UTF_8));
+        var body = "grant_type=refresh_token&refresh_token=" + URLEncoder.encode(activeRefreshToken, StandardCharsets.UTF_8);
+
+        try (var client = HttpClient.builder().runContext(runContext).build()) {
+            var request = HttpRequest.builder()
+                .uri(URI.create(rAuthUrl))
+                .method("POST")
+                .addHeader("Accept", "application/json")
+                .addHeader("Content-Type", "application/x-www-form-urlencoded")
+                .addHeader("Authorization", authHeader)
+                .body(HttpRequest.StringRequestBody.builder()
+                    .content(body)
+                    .contentType("application/x-www-form-urlencoded")
+                    .charset(StandardCharsets.UTF_8)
+                    .build())
+                .build();
+
+            var response = client.request(request, String.class);
+
+            if (response.getBody() == null || response.getBody().isEmpty()) {
+                throw new IllegalStateException("Empty response body from Intuit OAuth2.");
+            }
+
+            TokenResponse tokenResponse;
+            try {
+                tokenResponse = JacksonMapper.ofJson().readValue(response.getBody(), TokenResponse.class);
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to parse Intuit OAuth2 response.");
+            }
+
+            if (tokenResponse.getExpiresIn() <= 0 || tokenResponse.getAccessToken() == null || tokenResponse.getAccessToken().isBlank()) {
+                throw new IllegalStateException("Invalid token response received. expires_in must be > 0 and access_token must not be blank.");
+            }
+            return tokenResponse;
+        }
+    }
+
+    private void persistState(RunContext runContext, KVStore kvStore, String kvKey, OAuthState newState, long xRefreshTokenExpiresIn) throws Exception {
+        var metadata = new KVMetadata(null, xRefreshTokenExpiresIn > 0 ? Duration.ofSeconds(xRefreshTokenExpiresIn) : Duration.ofDays(100));
+        String encrypted;
+        try {
+            encrypted = runContext.encrypt(JacksonMapper.ofJson().writeValueAsString(newState));
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to encrypt KV store data. Please configure 'kestra.encryption.secret-key' in your Kestra configuration.", e);
+        }
+
+        try {
+            kvStore.put(kvKey, new KVValueAndMetadata(metadata, encrypted));
+        } catch (Exception e) {
+            runContext.logger().warn("Failed to persist rotated QuickBooks tokens to KV store. The newly rotated refresh token is lost.");
+            throw new IllegalStateException("Failed to save new refresh token. Your current refresh token may have been invalidated by Intuit. Please re-authenticate and provide a new refresh token.", e);
+        }
+    }
+
+    private String getOrRefreshToken(RunContext runContext, KVStore kvStore, String kvKey, String rClientId, String rClientSecret, String rRefreshToken, String seedHash, String rAuthUrl, boolean isRetry) throws Exception {
+        var activeRefreshToken = rRefreshToken;
+        var state = readState(runContext, kvStore, kvKey);
+
+        if (state != null && seedHash.equals(state.getSeedHash())) {
+            if (state.getExpiresAt() > Instant.now().getEpochSecond() + 60) {
+                return state.getAccessToken();
+            }
+            if (state.getRefreshToken() != null && !state.getRefreshToken().isEmpty()) {
                 activeRefreshToken = state.getRefreshToken();
             }
         }
 
-        // We need to refresh the token
-        String authHeader = "Basic " + Base64.getEncoder().encodeToString((currentClientId + ":" + currentClientSecret).getBytes(StandardCharsets.UTF_8));
-        String body = "grant_type=refresh_token&refresh_token=" + activeRefreshToken;
-
-        HttpRequest request = HttpRequest.builder()
-            .uri(URI.create("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"))
-            .method("POST")
-            .addHeader("Accept", "application/json")
-            .addHeader("Content-Type", "application/x-www-form-urlencoded")
-            .addHeader("Authorization", authHeader)
-            .body(HttpRequest.StringRequestBody.builder()
-                .content(body)
-                .contentType("application/x-www-form-urlencoded")
-                .charset(StandardCharsets.UTF_8)
-                .build())
-            .build();
-
-        HttpResponse<String> response = client.request(request, String.class);
-
-        if (response.getStatus().getCode() >= 300) {
-            throw new IllegalStateException("Intuit OAuth2 refresh failed with status " + response.getStatus().getCode() + " " + response.getBody() + ". Please re-authenticate and provide a new refresh token.");
+        boolean isSeedToken = activeRefreshToken.equals(rRefreshToken);
+        if (isSeedToken && state != null) {
+            runContext.logger().info("KV entry has expired and the seed token is used. The seed token may be stale.");
         }
 
-        TokenResponse tokenResponse = JacksonMapper.ofJson().readValue(response.getBody(), TokenResponse.class);
+        TokenResponse tokenResponse;
+        try {
+            tokenResponse = performRefresh(runContext, rAuthUrl, rClientId, rClientSecret, activeRefreshToken);
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (HttpClientResponseException e) {
+            String bodyStr = e.getMessage() != null ? e.getMessage() : "";
+            if (!isRetry && e.getResponse().getStatus().getCode() == 400 && bodyStr.contains("invalid_grant")) {
+                OAuthState freshState = readState(runContext, kvStore, kvKey);
+                if (freshState != null && freshState.getRefreshToken() != null && !freshState.getRefreshToken().equals(activeRefreshToken)) {
+                    return getOrRefreshToken(runContext, kvStore, kvKey, rClientId, rClientSecret, rRefreshToken, seedHash, rAuthUrl, true);
+                }
+            }
+            String staleMsg = isSeedToken ? " Your seed refresh token may be stale." : "";
+            if (e.getResponse().getStatus().getCode() == 400 || e.getResponse().getStatus().getCode() == 401) {
+                throw new IllegalStateException("Intuit OAuth2 refresh failed with status " + e.getResponse().getStatus().getCode() + "." + staleMsg + " Please re-authenticate and provide a new refresh token.", e);
+            } else {
+                throw new IllegalStateException("Intuit OAuth2 refresh failed with transient status " + e.getResponse().getStatus().getCode() + ". Please retry later.", e);
+            }
+        } catch (Exception e) {
+            String staleMsg = isSeedToken ? " Your seed refresh token may be stale." : "";
+            throw new IllegalStateException("Intuit OAuth2 refresh failed." + staleMsg + " Please re-authenticate and provide a new refresh token.", e);
+        }
 
-        OAuthState newState = new OAuthState();
-        newState.setAccessToken(tokenResponse.getAccess_token());
-        newState.setRefreshToken(tokenResponse.getRefresh_token());
-        newState.setExpiresAt(Instant.now().getEpochSecond() + tokenResponse.getExpires_in());
+        var newState = new OAuthState();
+        newState.setAccessToken(tokenResponse.getAccessToken());
+        newState.setRefreshToken(tokenResponse.getRefreshToken() != null && !tokenResponse.getRefreshToken().isEmpty() ? tokenResponse.getRefreshToken() : activeRefreshToken);
+        newState.setExpiresAt(Instant.now().getEpochSecond() + tokenResponse.getExpiresIn());
+        newState.setSeedHash(seedHash);
 
-        // Save to KV store. If this fails, the exception will propagate and fail the task loudly
-        // to prevent data corruption per security guidelines.
-        kvStore.put(kvKey, new io.kestra.core.storages.kv.KVValueAndMetadata(
-            (io.kestra.core.storages.kv.KVMetadata) null,
-            JacksonMapper.ofJson().writeValueAsString(newState)
-        ));
-
+        persistState(runContext, kvStore, kvKey, newState, tokenResponse.getXRefreshTokenExpiresIn());
         return newState.getAccessToken();
     }
 
     @Data
     @NoArgsConstructor
     @JsonIgnoreProperties(ignoreUnknown = true)
-    protected static class TokenResponse {
-        private String access_token;
-        private String refresh_token;
-        private long expires_in;
-        private long x_refresh_token_expires_in;
+    static class TokenResponse {
+        @JsonProperty("access_token")
+        @ToString.Exclude
+        private String accessToken;
+        @JsonProperty("refresh_token")
+        @ToString.Exclude
+        private String refreshToken;
+        @JsonProperty("expires_in")
+        private long expiresIn;
+        @JsonProperty("x_refresh_token_expires_in")
+        private long xRefreshTokenExpiresIn;
     }
 
     @Data
     @NoArgsConstructor
     @JsonIgnoreProperties(ignoreUnknown = true)
-    protected static class OAuthState {
+    static class OAuthState {
+        @ToString.Exclude
         private String accessToken;
+        @ToString.Exclude
         private String refreshToken;
         private long expiresAt;
+        // Stored to invalidate the KV cache when the user updates the seed token property
+        private String seedHash;
     }
 }

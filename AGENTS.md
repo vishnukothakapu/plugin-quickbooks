@@ -3,7 +3,7 @@
 ## What
 
 - Provides plugin components under `io.kestra.plugin.quickbooks`.
-- Includes classes such as `Example`, `Trigger`.
+- Includes the base class `AbstractQuickBooksConnection`.
 
 ## Why
 
@@ -25,7 +25,7 @@ Infrastructure dependencies (Docker Compose services):
 
 ### Key Plugin Classes
 
-- `io.kestra.plugin.quickbooks.Example`
+- `io.kestra.plugin.quickbooks.AbstractQuickBooksConnection`
 
 ### Project Structure
 

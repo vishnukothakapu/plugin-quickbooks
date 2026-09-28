@@ -1,8 +1,8 @@
 group: io.kestra.plugin.quickbooks
 name: "quickbooks"
-title: "Quickbooks"
-description: "Quickbooks plugin for Kestra"
-body: ""
+title: "QuickBooks"
+description: "QuickBooks plugin for Kestra"
+body: "This plugin provides QuickBooks Online integration, including tasks for querying entities and syncing CDC events."
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"
