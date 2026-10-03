@@ -51,8 +51,8 @@ import static io.kestra.core.utils.Rethrow.throwConsumer;
                   - id: open_invoices
                     type: io.kestra.plugin.quickbooks.query.Query
                     clientId: "{{ secret('QBO_CLIENT_ID') }}"
-                    clientSecret: "{{ secret('QBO_CLIENT_SECRET') }}"
-                    refreshToken: "{{ secret('QBO_REFRESH_TOKEN') }}"
+                    clientSecret: "{{ secret('QUICKBOOKS_CLIENT_SECRET') }}"
+                    refreshToken: "{{ secret('QUICKBOOKS_REFRESH_TOKEN') }}"
                     realmId: "{{ secret('QBO_REALM_ID') }}"
                     query: "select * from Invoice where Balance > '0'"
                     fetchType: STORE
@@ -72,7 +72,7 @@ public class Query extends AbstractQuickBooksConnection implements RunnableTask<
     )
     @PluginProperty(dynamic = true, group = "main")
     @NotNull
-    private Property<String> query;
+    protected Property<String> query;
 
     @Schema(
         title = "The way to consume the results",
@@ -85,12 +85,12 @@ public class Query extends AbstractQuickBooksConnection implements RunnableTask<
 
     @Override
     public FetchOutput run(RunContext runContext) throws Exception {
-        String renderedQuery = runContext.render(this.query).as(String.class).orElseThrow();
+        String renderedQuery = runContext.render(this.query).as(String.class).orElseThrow(() -> new io.kestra.core.exceptions.IllegalVariableEvaluationException("Variable evaluation failed"));
         FetchType type = runContext.render(this.fetchType).as(FetchType.class).orElse(FetchType.STORE);
         String accessToken = this.getAccessToken(runContext);
-        String realmId = runContext.render(this.getRealmId()).as(String.class).orElseThrow();
-        String baseUrl = runContext.render(this.getBaseUrl()).as(String.class).orElseThrow();
-        Integer minorVersion = runContext.render(this.getMinorVersion()).as(Integer.class).orElseThrow();
+        String realmId = runContext.render(this.getRealmId()).as(String.class).orElseThrow(() -> new io.kestra.core.exceptions.IllegalVariableEvaluationException("Variable evaluation failed"));
+        String baseUrl = this.getValidatedBaseUrl(runContext);
+        Integer minorVersion = this.getValidatedMinorVersion(runContext);
 
         // Strip existing pagination if provided
         renderedQuery = renderedQuery.replaceAll("(?i)\\s+(startposition|maxresults)\\s+\\d+", "");
@@ -109,7 +109,7 @@ public class Query extends AbstractQuickBooksConnection implements RunnableTask<
         int totalRows = 0;
         boolean hasMore = true;
 
-        try (var client = HttpClient.builder().runContext(runContext).build()) {
+        try (var client = io.kestra.core.http.client.HttpClient.builder().runContext(runContext).build()) {
             while (hasMore) {
                 String pagedQuery = renderedQuery + " STARTPOSITION " + startPosition + " MAXRESULTS " + maxResults;
                 String uriStr = baseUrl + "/v3/company/" + realmId + "/query?minorversion=" + minorVersion + "&query=" + URLEncoder.encode(pagedQuery, StandardCharsets.UTF_8);
@@ -135,7 +135,12 @@ public class Query extends AbstractQuickBooksConnection implements RunnableTask<
                                 throw new RuntimeException("Rate limit exceeded and max retries reached.", e);
                             }
                             // Exponential backoff
-                            Thread.sleep((long) (Math.pow(2, attempt) * 1000));
+                            try {
+                                Thread.sleep((long) (Math.pow(2, attempt) * 1000));
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException("Thread interrupted during backoff", ie);
+                            }
                         } else {
                             throw new RuntimeException("QuickBooks API request failed: " + e.getMessage(), e);
                         }

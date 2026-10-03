@@ -1,0 +1,6 @@
+﻿title: Reports
+description: This sub-group of plugins contains tasks for accessing QuickBooks reports.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.reports
+name: Reports
+body: ''

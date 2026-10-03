@@ -41,11 +41,15 @@ class AbstractQuickBooksConnectionTest {
     private RunContextFactory runContextFactory;
 
     private static WireMockServer wireMockServer;
+    
+    public static String getWireMockBaseUrl() {
+        return wireMockServer.baseUrl();
+    }
 
     @BeforeAll
     static void setup() {
-        wireMockServer = new WireMockServer(WireMockConfiguration.options().dynamicPort());
-        wireMockServer.start();
+        wireMockServer = new WireMockServer(WireMockConfiguration.options().dynamicPort().enableBrowserProxying(true));
+        wireMockServer.start(); System.setProperty("http.proxyHost", "127.0.0.1"); System.setProperty("http.proxyPort", String.valueOf(wireMockServer.port())); System.setProperty("https.proxyHost", "127.0.0.1"); System.setProperty("https.proxyPort", String.valueOf(wireMockServer.port()));
         WireMock.configureFor("localhost", wireMockServer.port());
     }
 
@@ -58,13 +62,7 @@ class AbstractQuickBooksConnectionTest {
     @Getter
     @NoArgsConstructor
     public static class QuickBooksTestTask extends AbstractQuickBooksConnection {
-        @Override
-        protected void validateUrl(String name, String url) throws Exception {
-            var uri = java.net.URI.create(url);
-            if (!"https".equalsIgnoreCase(uri.getScheme()) && !"localhost".equals(uri.getHost()) && !"127.0.0.1".equals(uri.getHost())) {
-                super.validateUrl(name, url);
-            }
-        }
+
     }
 
     private String getRandomRealmId() {
@@ -81,8 +79,7 @@ class AbstractQuickBooksConnectionTest {
             .clientId(Property.ofValue("test_client"))
             .clientSecret(Property.ofValue("test_secret"))
             .refreshToken(Property.ofValue("initial_refresh_token"))
-            .realmId(Property.ofValue(realmId))
-            .authUrl(Property.ofValue(wireMockServer.baseUrl() + "/oauth2/v1/tokens/bearer"));
+            .realmId(Property.ofValue(realmId)).authUrl(Property.ofValue(wireMockServer.baseUrl() + "/oauth2/v1/tokens/bearer"));
     }
 
 
@@ -266,14 +263,6 @@ class AbstractQuickBooksConnectionTest {
     @NoArgsConstructor
     public static class QuickBooksConcurrencyTestTask extends AbstractQuickBooksConnection {
         private String injectedRotatedToken;
-        
-        @Override
-        protected void validateUrl(String name, String url) throws Exception {
-            var uri = java.net.URI.create(url);
-            if (!"https".equalsIgnoreCase(uri.getScheme()) && !"localhost".equals(uri.getHost()) && !"127.0.0.1".equals(uri.getHost())) {
-                super.validateUrl(name, url);
-            }
-        }
 
         @Override
         protected TokenResponse performRefresh(RunContext runContext, String rAuthUrl, String rClientId, String rClientSecret, String activeRefreshToken) throws Exception {
@@ -313,9 +302,7 @@ class AbstractQuickBooksConnectionTest {
             .clientId(Property.ofValue("test_client"))
             .clientSecret(Property.ofValue("test_secret"))
             .refreshToken(Property.ofValue("initial_refresh_token"))
-            .realmId(Property.ofValue(realmId))
-            .authUrl(Property.ofValue(wireMockServer.baseUrl() + "/oauth2/v1/tokens/bearer"))
-            .injectedRotatedToken("new_rotated_refresh")
+            .realmId(Property.ofValue(realmId)).authUrl(Property.ofValue(wireMockServer.baseUrl() + "/oauth2/v1/tokens/bearer")).injectedRotatedToken("new_rotated_refresh")
             .build();
             
         var runContext = getRunContext();

@@ -1,0 +1,6 @@
+﻿title: Bill
+description: This sub-group of plugins contains tasks for accessing QuickBooks Bills.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.bills
+name: Bill
+body: ''

@@ -1,0 +1,6 @@
+﻿title: Payment
+description: This sub-group of plugins contains tasks for accessing QuickBooks Payments.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.payments
+name: Payment
+body: ''

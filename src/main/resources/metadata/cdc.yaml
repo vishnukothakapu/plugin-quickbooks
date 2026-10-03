@@ -1,0 +1,6 @@
+﻿title: Change Data Capture (CDC)
+description: This sub-group of plugins contains tasks for accessing QuickBooks Change Data Capture (CDC).
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.cdc
+name: Change Data Capture (CDC)
+body: ''

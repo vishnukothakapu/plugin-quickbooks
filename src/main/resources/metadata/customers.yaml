@@ -1,0 +1,6 @@
+﻿title: Customer
+description: This sub-group of plugins contains tasks for accessing QuickBooks Customers.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.customers
+name: Customer
+body: ''

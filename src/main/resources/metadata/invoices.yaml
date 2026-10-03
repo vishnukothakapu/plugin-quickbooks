@@ -1,0 +1,6 @@
+﻿title: Invoice
+description: This sub-group of plugins contains tasks for accessing QuickBooks Invoices.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.invoices
+name: Invoice
+body: ''

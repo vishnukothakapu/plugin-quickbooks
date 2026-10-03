@@ -1,0 +1,6 @@
+title: Company Info
+description: Retrieves information about the QuickBooks Online company.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.companyinfo
+name: Company Info
+body: "This sub-package contains a task to fetch company details from QBO."

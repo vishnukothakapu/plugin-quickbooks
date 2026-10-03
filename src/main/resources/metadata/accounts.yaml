@@ -1,0 +1,6 @@
+﻿title: Account
+description: This sub-group of plugins contains tasks for accessing QuickBooks Accounts.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.accounts
+name: Account
+body: ''

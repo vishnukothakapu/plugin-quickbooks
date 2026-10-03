@@ -1,0 +1,6 @@
+﻿title: Item
+description: This sub-group of plugins contains tasks for accessing QuickBooks Items.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.items
+name: Item
+body: ''

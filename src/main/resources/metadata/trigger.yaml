@@ -1,0 +1,6 @@
+title: Trigger
+description: QuickBooks triggers.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.trigger
+name: Trigger
+body: ""

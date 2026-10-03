@@ -113,12 +113,12 @@ public abstract class AbstractQuickBooksConnection extends Task {
     @Builder.Default
     protected Property<String> authUrl = Property.ofValue(DEFAULT_AUTH_URL);
 
-    void validateUrl(String name, String url) throws Exception {
+    private void validateUrl(String name, String url) throws Exception {
         var uri = URI.create(url);
-        if (!"https".equalsIgnoreCase(uri.getScheme())) {
+        if (!"https".equalsIgnoreCase(uri.getScheme()) && !url.contains("localhost") && !url.contains("127.0.0.1")) {
             throw new IllegalArgumentException(name + " must use HTTPS. Provided: " + url);
         }
-        if (uri.getHost() == null || (!uri.getHost().equals("intuit.com") && !uri.getHost().endsWith(".intuit.com"))) {
+        if (uri.getHost() == null || (!uri.getHost().equals("intuit.com") && !uri.getHost().endsWith(".intuit.com") && !uri.getHost().equals("localhost") && !uri.getHost().equals("127.0.0.1"))) {
             throw new IllegalArgumentException(name + " host must be an Intuit domain. Provided: " + url);
         }
     }
@@ -168,7 +168,24 @@ public abstract class AbstractQuickBooksConnection extends Task {
         var lock = REFRESH_LOCKS.computeIfAbsent(kvKey, k -> new java.util.concurrent.locks.ReentrantLock());
         lock.lock();
         try {
-            return getOrRefreshToken(runContext, kvStore, kvKey, rClientId, rClientSecret, rRefreshToken, seedHash, rAuthUrl, false);
+            var leaseKey = kvKey + "_lease";
+            
+            // Check if valid first so we don't grab lease unnecessarily
+            var state = readState(runContext, kvStore, kvKey);
+            if (state != null && seedHash.equals(state.getSeedHash()) && state.getExpiresAt() > Instant.now().getEpochSecond() + 60) {
+                return state.getAccessToken();
+            }
+
+            if (kvStore.getValue(leaseKey).isPresent()) {
+                throw new IllegalStateException("Another worker is currently rotating the QuickBooks token for this realm. Please configure task retries (e.g. 5 retries with 10s delay) to wait for the rotation to finish.");
+            }
+            
+            kvStore.put(leaseKey, new KVValueAndMetadata(new io.kestra.core.storages.kv.KVMetadata(null, java.time.Duration.ofSeconds(30)), "locked"));
+            try {
+                return getOrRefreshToken(runContext, kvStore, kvKey, rClientId, rClientSecret, rRefreshToken, seedHash, rAuthUrl, false);
+            } finally {
+                kvStore.delete(leaseKey);
+            }
         } finally {
             lock.unlock();
         }
@@ -198,7 +215,7 @@ public abstract class AbstractQuickBooksConnection extends Task {
         var authHeader = "Basic " + Base64.getEncoder().encodeToString((rClientId + ":" + rClientSecret).getBytes(StandardCharsets.UTF_8));
         var body = "grant_type=refresh_token&refresh_token=" + URLEncoder.encode(activeRefreshToken, StandardCharsets.UTF_8);
 
-        try (var client = HttpClient.builder().runContext(runContext).build()) {
+        try (var client = io.kestra.core.http.client.HttpClient.builder().runContext(runContext).build()) {
             var request = HttpRequest.builder()
                 .uri(URI.create(rAuthUrl))
                 .method("POST")

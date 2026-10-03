@@ -1,0 +1,6 @@
+﻿title: Vendor
+description: This sub-group of plugins contains tasks for accessing QuickBooks Vendors.
+pluginType: SUBGROUP
+group: io.kestra.plugin.quickbooks.vendors
+name: Vendor
+body: ''
