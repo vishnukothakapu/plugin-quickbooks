@@ -113,7 +113,7 @@ public abstract class AbstractQuickBooksConnection extends Task {
     @Builder.Default
     protected Property<String> authUrl = Property.ofValue(DEFAULT_AUTH_URL);
 
-    void validateUrl(String name, String url) throws Exception {
+    protected void validateUrl(String name, String url) throws Exception {
         var uri = URI.create(url);
         if (!"https".equalsIgnoreCase(uri.getScheme())) {
             throw new IllegalArgumentException(name + " must use HTTPS. Provided: " + url);
